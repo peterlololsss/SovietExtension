@@ -11,6 +11,8 @@
 #import "RevokePatch.h"
 #import "MistyModeSettingsWindowController.h"
 #import "RevokeSettings.h"
+#import "SidebarManager.h"
+#import "SidebarSettingsWindowController.h"
 #import <objc/runtime.h>
 
 #ifndef kExitChatroomNickname
@@ -48,6 +50,7 @@ static void YMProtectAssistantMenuRole(void) {
 @interface MenuManager ()
 @property (nonatomic, strong) NSMenuItem *ym_mistyModeMenuItem;
 @property (nonatomic, strong) MistyModeSettingsWindowController *ym_mistySettingsWindowController;
+@property (nonatomic, strong) SidebarSettingsWindowController *ym_sidebarSettingsWindowController;
 @end
 
 @implementation MenuManager
@@ -70,6 +73,7 @@ static void YMProtectAssistantMenuRole(void) {
     YMRegisterSelfRevokeDefault([NSUserDefaults standardUserDefaults]);
     [self ym_registerDefaultBool:NO forKey:kExitChatroomNick];
     [MistyModeSettingsWindowController registerDefaults];
+    [SidebarManager registerDefaults];
 
     NSMenuItem *antiUpdateMenu = [self ym_toggleMenuItemWithTitle:@"阻止更新"
                                                               key:kAntiUpdate
@@ -140,6 +144,7 @@ static void YMProtectAssistantMenuRole(void) {
                                                         state:NO];
     
     NSMenuItem *themeMenu = [self ym_createThemeModeMenu];
+    NSMenuItem *sidebarMenu = [self ym_createSidebarMenu];
    
     NSString *version = [NSString stringWithFormat:@"当前版本 %@", kCurrentVersion];
     NSMenuItem *currentVersionMenu = [NSMenuItem menuItemWithTitle:version
@@ -153,6 +158,7 @@ static void YMProtectAssistantMenuRole(void) {
     [subMenu addItems:@[
         antiUpdateMenu,
         themeMenu,
+        sidebarMenu,
         revokeGroup,
         groupMenu,
         autoLoginMenu,
@@ -264,6 +270,37 @@ static void YMProtectAssistantMenuRole(void) {
 {
     self.ym_mistyModeMenuItem = item;
     [self ym_showMistyModeSettingsWindow:item];
+}
+
+- (void)onOpenSidebarSettings:(NSMenuItem *)item
+{
+    (void)item;
+    if (!self.ym_sidebarSettingsWindowController) {
+        self.ym_sidebarSettingsWindowController =
+            [[SidebarSettingsWindowController alloc] init];
+    }
+    [self.ym_sidebarSettingsWindowController showWindowCentered];
+}
+
+#pragma mark - 侧边栏 Menu
+
+- (NSMenuItem *)ym_createSidebarMenu
+{
+    NSMenu *submenu = [[NSMenu alloc] initWithTitle:@"侧边栏管理"];
+
+    NSMenuItem *openItem = [NSMenuItem menuItemWithTitle:@"管理左侧入口…"
+                                                  action:@selector(onOpenSidebarSettings:)
+                                                  target:self
+                                           keyEquivalent:@""
+                                                   state:NO];
+    [submenu addItem:openItem];
+
+    NSMenuItem *sidebarMenu = [[NSMenuItem alloc] init];
+    sidebarMenu.title = @"侧边栏管理";
+    sidebarMenu.target = self;
+    sidebarMenu.enabled = YES;
+    sidebarMenu.submenu = submenu;
+    return sidebarMenu;
 }
 
 #pragma mark - 主题模式 Menu
