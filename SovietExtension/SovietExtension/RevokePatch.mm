@@ -10,6 +10,7 @@
 #import "RevokePatch.h"
 #import "StartupPermission.h"
 #import "AntiUpdate.h"
+#import "CaptureUnblock.h"
 #import "AutoLogin.h"
 #import <Foundation/Foundation.h>
 #import <mach/mach.h>
@@ -5444,6 +5445,7 @@ static void YMLoadFeatureSwitchesFromDefaults(void) {
 YMFeatureApplyResult YMApplyFeatureSetting(NSString *key, BOOL enabled) {
     if (![NSThread isMainThread]) return YMFeatureUnavailable;
     if ([key isEqualToString:kAntiUpdate]) return enabled == YMFeatureAntiUpdateEnabled ? YMFeatureApplied : YMFeatureNeedsRestart;
+    if ([key isEqualToString:kAllowWindowCapture]) return YMSetAllowWindowCaptureEnabled(enabled) ? YMFeatureApplied : YMFeatureUnavailable;
     if ([key isEqualToString:kAutoLogin] || [key isEqualToString:kRevokeForwardToSelfRealSend] ||
         [key isEqualToString:kRevokeForwardOthers] || [key isEqualToString:kRevokeForwardSelf]) {
         return YMFeatureApplied;

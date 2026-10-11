@@ -13,6 +13,7 @@
 #import "RevokeSettings.h"
 #import "SidebarManager.h"
 #import "SidebarSettingsWindowController.h"
+#import "CaptureUnblock.h"
 #import <objc/runtime.h>
 
 #ifndef kExitChatroomNickname
@@ -74,10 +75,16 @@ static void YMProtectAssistantMenuRole(void) {
     [self ym_registerDefaultBool:NO forKey:kExitChatroomNick];
     [MistyModeSettingsWindowController registerDefaults];
     [SidebarManager registerDefaults];
+    [self ym_registerDefaultBool:NO forKey:kAllowWindowCapture];
+    YMSetAllowWindowCaptureEnabled([[NSUserDefaults standardUserDefaults] boolForKey:kAllowWindowCapture]);
 
     NSMenuItem *antiUpdateMenu = [self ym_toggleMenuItemWithTitle:@"阻止更新"
                                                               key:kAntiUpdate
                                                            action:@selector(onAntiUpdate:)];
+
+    NSMenuItem *allowCaptureMenu = [self ym_toggleMenuItemWithTitle:@"允许截图主窗口"
+                                                                key:kAllowWindowCapture
+                                                             action:@selector(onAllowWindowCapture:)];
     
     BOOL separateRevoke = [[[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] isEqualToString:@"269079"];
     NSMenu *revokeGroupSub = [[NSMenu alloc] initWithTitle:@"消息撤回"];
@@ -157,6 +164,7 @@ static void YMProtectAssistantMenuRole(void) {
     NSMenu *subMenu = [[NSMenu alloc] initWithTitle:@"苏维埃助手"];
     [subMenu addItems:@[
         antiUpdateMenu,
+        allowCaptureMenu,
         themeMenu,
         sidebarMenu,
         revokeGroup,
@@ -195,6 +203,13 @@ static void YMProtectAssistantMenuRole(void) {
     [self ym_confirmToggleMenuItem:item
                    userDefaultsKey:kAntiUpdate
                    informativeText:@"非必要情况千万不要关闭`禁止更新`,否则微信自动更新导致插件失效"];
+}
+
+- (void)onAllowWindowCapture:(NSMenuItem *)item
+{
+    [self ym_confirmToggleMenuItem:item
+                   userDefaultsKey:kAllowWindowCapture
+                   informativeText:nil];
 }
 
 - (void)onRevokeEnabled:(NSMenuItem *)item
