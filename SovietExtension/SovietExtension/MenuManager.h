@@ -24,7 +24,7 @@ static NSString *kUseSystemWeb = @"kUseSystemWeb.SOVIET";
 static NSString *kIsFirstLoad = @"kIsFirstLoad.SOVIET";
 static NSString *kAutoLogin = @"kAutoLogin.SOVIET";
 static NSString *kAllowWindowCapture = @"kAllowWindowCapture.SOVIET";
-static NSString *kCurrentVersion = @"1.4.2";
+static NSString *kCurrentVersion = @"1.4.3";
 
 @interface MenuManager : NSObject
 @property (nonatomic, assign) BOOL hasLoadMistyHook;
