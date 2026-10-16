@@ -791,8 +791,8 @@ static void YMRefreshAllWindows(void) {
     }
 
     YMRegisterMistyThemeDefaults();
-    if (!YMMistyModeEnabled()) {
-        // CGS 保活只属于迷离模式。
+    if (!YMThemeEffectEnabled()) {
+        // 保活定时器在任一模式下都要跑；只有两种模式都关掉时才停。
         [gYMBlurKeepAliveTimer invalidate];
         gYMBlurKeepAliveTimer = nil;
     }
@@ -824,10 +824,25 @@ static void YMRefreshAllWindows(void) {
     }
 }
 
-static void YMStartBlurKeepAliveIfNeeded(void) {
-    if (!YMMistyModeEnabled() || gYMBlurKeepAliveTimer) return;
-    gYMBlurKeepAliveTimer = [NSTimer timerWithTimeInterval:kYMBlurKeepAliveInterval repeats:YES block:^(NSTimer *timer) {
+static void YMBlurKeepAliveTick(void) {
+    if (YMMistyModeEnabled()) {
+        // 迷离模式：整窗刷新，兼做 CGS 私有模糊保活。
         YMRefreshAllWindows();
+        return;
+    }
+    // 导航栏玻璃模式：只重新评估被锁定的主窗 QNSView。朋友圈等停靠面板关闭后，主窗
+    // QNSView 未必再产生 churn 事件（viewDidMoveTo* / setLayer），玻璃就卡在暂歇态
+    // 回不来；靠这个轮询把它重新挂回去。面板还在时仍会命中 YMMainWindowHasDockedPane
+    // 保持暂歇、保持窗口不透明，不会整窗透明化（所以不走 YMRefreshAllWindows，避免闪白）。
+    if (!YMNavigationGlassModeEnabled()) return;
+    NSView *mainQNS = YMLiquidGlassNavigationMainQNSView();
+    if (mainQNS) YMInstallBlurBackgroundBehindQNSView(mainQNS);
+}
+
+static void YMStartBlurKeepAliveIfNeeded(void) {
+    if (!YMThemeEffectEnabled() || gYMBlurKeepAliveTimer) return;
+    gYMBlurKeepAliveTimer = [NSTimer timerWithTimeInterval:kYMBlurKeepAliveInterval repeats:YES block:^(NSTimer *timer) {
+        YMBlurKeepAliveTick();
     }];
     [[NSRunLoop mainRunLoop] addTimer:gYMBlurKeepAliveTimer forMode:NSRunLoopCommonModes];
 }
