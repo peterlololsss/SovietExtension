@@ -18,7 +18,13 @@ static void (*YMOriginalSetSharingType)(id, SEL, NSWindowSharingType);
 static const void *YMRequestedSharingTypeKey = &YMRequestedSharingTypeKey;
 
 static BOOL YMIsCaptureUnblockTarget(NSWindow *window) {
-    return window.level == NSNormalWindowLevel && !window.ignoresMouseEvents && window.title.length > 0;
+    // 普通层级 + 接收鼠标，排除微信截图工具自身的浮层（高层级或忽略鼠标）。
+    if (window.level != NSNormalWindowLevel || window.ignoresMouseEvents) return NO;
+    // 原先还要求 title.length>0，会漏掉无标题的内容窗口（大图预览、独立朋友圈子窗、
+    // 某些状态下的主窗），它们因此保持 NSWindowSharingNone -> 截图发黑。改为按尺寸判定：
+    // 足够大的即视为内容窗口。
+    NSRect f = window.frame;
+    return f.size.width >= 200.0 && f.size.height >= 200.0;
 }
 
 static void YMAllowCaptureSetSharingType(NSWindow *self, SEL _cmd, NSWindowSharingType type) {
@@ -62,11 +68,19 @@ static BOOL YMInstallAllowWindowCaptureHook(void) {
         method_setImplementation(method, (IMP)YMAllowCaptureSetSharingType);
 
     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
-    for (NSNotificationName name in @[NSWindowDidBecomeKeyNotification, NSWindowDidChangeOcclusionStateNotification]) {
+    for (NSNotificationName name in @[NSWindowDidBecomeKeyNotification, NSWindowDidChangeOcclusionStateNotification,
+                                      NSWindowDidUpdateNotification, NSWindowDidResizeNotification,
+                                      NSWindowDidMiniaturizeNotification, NSWindowDidDeminiaturizeNotification]) {
         [center addObserverForName:name object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
             if (YMAllowWindowCaptureEnabled) YMApplyAllowWindowCaptureToOpenWindows();
         }];
     }
+    // 兜底轮询：微信可能在不触发上述通知的时机对新窗口调用 setSharingType:None（如大图预览
+    // 弹出、pc_forbid_screenshot 延迟下发）。每 0.75s 扫一遍，确保所有内容窗口都被放开。
+    NSTimer *sweep = [NSTimer timerWithTimeInterval:0.75 repeats:YES block:^(NSTimer *t) {
+        if (YMAllowWindowCaptureEnabled) YMApplyAllowWindowCaptureToOpenWindows();
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:sweep forMode:NSRunLoopCommonModes];
     YMLog(@"allow capture hook installed");
     return YES;
 }
