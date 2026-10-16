@@ -13,6 +13,7 @@
 #import "RevokeSettings.h"
 #import "SidebarManager.h"
 #import "SidebarSettingsWindowController.h"
+#import "QuickQuit.h"
 #import "CaptureUnblock.h"
 #import <objc/runtime.h>
 
@@ -75,12 +76,18 @@ static void YMProtectAssistantMenuRole(void) {
     [self ym_registerDefaultBool:NO forKey:kExitChatroomNick];
     [MistyModeSettingsWindowController registerDefaults];
     [SidebarManager registerDefaults];
+    [self ym_registerDefaultBool:YES forKey:kQuickQuit];
+    YMSetQuickQuitEnabled([[NSUserDefaults standardUserDefaults] boolForKey:kQuickQuit]);
     [self ym_registerDefaultBool:NO forKey:kAllowWindowCapture];
     YMSetAllowWindowCaptureEnabled([[NSUserDefaults standardUserDefaults] boolForKey:kAllowWindowCapture]);
 
     NSMenuItem *antiUpdateMenu = [self ym_toggleMenuItemWithTitle:@"阻止更新"
                                                               key:kAntiUpdate
                                                            action:@selector(onAntiUpdate:)];
+
+    NSMenuItem *quickQuitMenu = [self ym_toggleMenuItemWithTitle:@"⌘Q 直接退出"
+                                                             key:kQuickQuit
+                                                          action:@selector(onQuickQuit:)];
 
     NSMenuItem *allowCaptureMenu = [self ym_toggleMenuItemWithTitle:@"允许截图主窗口"
                                                                 key:kAllowWindowCapture
@@ -161,9 +168,10 @@ static void YMProtectAssistantMenuRole(void) {
                                                              state:NO];
     currentVersionMenu.enabled = NO;
     
-    NSMenu *subMenu = [[NSMenu alloc] initWithTitle:@"苏维埃助手"];
+    NSMenu *subMenu = [[NSMenu alloc] initWithTitle:@"扩展"];
     [subMenu addItems:@[
         antiUpdateMenu,
+        quickQuitMenu,
         allowCaptureMenu,
         themeMenu,
         sidebarMenu,
@@ -176,7 +184,7 @@ static void YMProtectAssistantMenuRole(void) {
     ]];
     
     NSMenuItem *menuItem = [[NSMenuItem alloc] init];
-    menuItem.title = @"苏维埃助手";
+    menuItem.title = @"扩展";
     menuItem.target = self;
     menuItem.enabled = YES;
     menuItem.submenu = subMenu;
@@ -203,6 +211,13 @@ static void YMProtectAssistantMenuRole(void) {
     [self ym_confirmToggleMenuItem:item
                    userDefaultsKey:kAntiUpdate
                    informativeText:@"非必要情况千万不要关闭`禁止更新`,否则微信自动更新导致插件失效"];
+}
+
+- (void)onQuickQuit:(NSMenuItem *)item
+{
+    [self ym_confirmToggleMenuItem:item
+                   userDefaultsKey:kQuickQuit
+                   informativeText:nil];
 }
 
 - (void)onAllowWindowCapture:(NSMenuItem *)item
