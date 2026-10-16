@@ -17,6 +17,7 @@
 #import "RevokePatch.h"
 #import "MistyModeSettingsWindowController.h"
 #import "YMColorfulBlurBackgroundView.h"
+#import "LiquidGlassNavigation.h"
 
 #pragma mark - 默认值
 static const BOOL kYMDefaultMistyModeEnabled = NO;
@@ -119,8 +120,37 @@ static NSInteger YMIntegerSetting(NSString *key, NSInteger defaultValue) {
     return [defaults integerForKey:key];
 }
 
+#pragma mark - 系统辅助功能偏好
+
+/// 降低透明度 / 提高对比度时暂停整窗透明，减少动态效果时停用流光动画。
+/// 用户的迷离模式开关保持不变，系统偏好恢复后自动重新应用。
+static BOOL gYMAccessibilitySuppressesMisty = NO;
+static BOOL gYMAccessibilityReduceMotion = NO;
+static id gYMAccessibilityObserver = nil;
+
+static void YMReadAccessibilityDisplayOptions(void) {
+    NSWorkspace *workspace = NSWorkspace.sharedWorkspace;
+    gYMAccessibilitySuppressesMisty = workspace.accessibilityDisplayShouldReduceTransparency ||
+                                      workspace.accessibilityDisplayShouldIncreaseContrast;
+    gYMAccessibilityReduceMotion = workspace.accessibilityDisplayShouldReduceMotion;
+}
+
 static BOOL YMMistyModeEnabled(void) {
+    if (gYMAccessibilitySuppressesMisty) return NO;
     return YMBoolSetting(kThemeMistyMode, kYMDefaultMistyModeEnabled);
+}
+
+/// 液态玻璃导航栏（2.0 第一阶段）：迷离模式优先，系统要求不透明时同样暂停。
+static BOOL YMNavigationGlassModeEnabled(void) {
+    if (gYMAccessibilitySuppressesMisty) return NO;
+    if (YMBoolSetting(kThemeMistyMode, kYMDefaultMistyModeEnabled)) return NO;
+    if (!YMLiquidGlassNavigationRequested()) return NO;
+    return YMLiquidGlassNavigationIdentityVerified();
+}
+
+/// 任一模式需要改写窗口 / QNSView 时为 YES。
+static BOOL YMThemeEffectEnabled(void) {
+    return YMMistyModeEnabled() || YMNavigationGlassModeEnabled();
 }
 
 static BOOL YMWindowBackgroundBlurEnabled(void) {
@@ -196,6 +226,7 @@ static CGFloat YMWindowBlurCarrierAlpha(void) {
 
 BOOL YMColorfulBlurBackgroundEnabled(void) {
     if (!YMMistyModeEnabled()) return NO;
+    if (gYMAccessibilityReduceMotion) return NO;
     if (!YMBoolSetting(kThemeMistyColorful, NO)) return NO;
     if (!YMWindowBackgroundBlurEnabled()) return NO;
     if (YMWindowBackgroundBlurRadius() <= 0) return NO;
@@ -309,6 +340,8 @@ static void YMCleanupMistyArtifactsForSkippedWindow(NSWindow *window) {
     if (!window) return;
 
     YMRemoveColorfulBlurBackgroundViewsInTree(window.contentView);
+    // 被跳过窗口清理：只移除它自己的 view，不得拆主窗的全局玻璃。
+    YMLiquidGlassNavigationRemoveViews(window);
     YMRestoreQNSViewsForSkippedWindowInTree(window.contentView);
     YMRestoreThemeObject(window);
 }
@@ -415,6 +448,20 @@ static BOOL YMShouldSkipMistyEffectForWindow(NSWindow *window) {
     // 这里阈值故意放低，避免把微信登录窗口误判掉。
     if (frame.size.width < 220.0 || frame.size.height < 120.0) {
         return YES;
+    }
+
+    // 导航栏玻璃只用于主窗口大小的窗口，而且只用于承载导航栏 owner 的那一个主窗。
+    if (!YMMistyModeEnabled()) {
+        if (!YMLiquidGlassNavigationWindowEligible(window)) {
+            return YES;
+        }
+        // 朋友圈 / 大图预览等其它顶层窗口一旦被透明化就会透穿成空白（回归：点开朋友圈
+        // 图片后主窗全白），所以这里把它们全部跳过、保持不透明。主窗在外层父 detour 首次
+        // 安装时锁定；未锁定前（启动早期）放行，让主窗能被处理并完成锁定。
+        NSView *mainQNS = YMLiquidGlassNavigationMainQNSView();
+        if (mainQNS && mainQNS.window && mainQNS.window != window) {
+            return YES;
+        }
     }
 
     return NO;
@@ -551,6 +598,9 @@ static void YMRestoreThemeObject(id object) {
     } else if ([object isKindOfClass:NSView.class]) {
         NSView *view = object;
         YMRemoveColorfulBlurBackgroundViewsInTree(view);
+        // 还原单个 view 是个偶发事件（任何窗口的 QNSView churn 都会触发），所以只能移除
+        // 该窗口的 view，绝不能拆全局 detour / 填充（否则朋友圈点图会把主窗弄白）。
+        YMLiquidGlassNavigationRemoveViews(view.window);
         view.alphaValue = [state[@"alpha"] doubleValue];
         view.wantsLayer = [state[@"wantsLayer"] boolValue];
         view.needsDisplay = YES;
@@ -576,6 +626,17 @@ static NSColor *YMWindowBlurCarrierColor(void) {
 
 static void YMMakeWindowTransparent(NSWindow *window) {
     if (!window) return;
+
+    // 防御纵深：导航栏玻璃模式下绝不透明化非主窗（该分支正常不应触发，触发即说明
+    // 有路径绕过了 YMShouldSkipMistyEffectForWindow）。
+    if (!YMMistyModeEnabled()) {
+        NSView *mainQNS = YMLiquidGlassNavigationMainQNSView();
+        if (mainQNS && mainQNS.window && mainQNS.window != window) {
+            NSLog(@"[YMLiquidGlass] WARN refusing to transparentize non-main window %@ %@",
+                  NSStringFromClass(window.class), NSStringFromRect(window.frame));
+            return;
+        }
+    }
 
     YMSaveThemeObject(window);
     window.opaque = NO;
@@ -619,9 +680,29 @@ static void YMMakeContainerBlurCarrier(NSView *container) {
     container.layer.backgroundColor = YMWindowBlurCarrierColor().CGColor;
 }
 
+// 朋友圈等「停靠面板」出现时，微信会把主面板画成空白的 Metal 层；整窗透明会把它
+// 透穿成空白。检测主窗容器里是否有「外来的、够大的、靠右停靠」的兄弟 view（朋友圈 feed 就是
+// 这样一块 ~440pt 宽、贴右边的面板）。普通聊天态没有这种 view，所以玻璃照常；一旦检测到
+// 就暂歇玻璃、保持窗口不透明（绝不空白），面板关闭后下次刷新自动恢复玻璃。
+static BOOL YMMainWindowHasDockedPane(NSView *container, NSView *qnsView) {
+    if (!container) return NO;
+    CGFloat cw = container.bounds.size.width;
+    if (cw <= 0) return NO;
+    for (NSView *v in container.subviews) {
+        if (v == qnsView) continue;
+        if ([v.identifier hasPrefix:@"YMLiquidGlassNavigation"]) continue;  // 本模块自己的 view
+        if (v.isHidden || v.alphaValue <= 0.01) continue;
+        NSRect f = v.frame;
+        if (f.size.width >= 200.0 && f.size.height >= 400.0 && NSMinX(f) > cw * 0.4) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static void YMInstallBlurBackgroundBehindQNSView(NSView *qnsView) {
     if (!YMIsQNSView(qnsView)) return;
-    if (gYMApplyingBlurBackground || !YMMistyModeEnabled()) return;
+    if (gYMApplyingBlurBackground || !YMThemeEffectEnabled()) return;
 
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -652,9 +733,21 @@ static void YMInstallBlurBackgroundBehindQNSView(NSView *qnsView) {
             return;
         }
 
+        // 停靠面板（朋友圈等）在时暂歇玻璃，避免主面板空白透穿；面板消失后自动恢复。
+        if (!YMMistyModeEnabled() && YMMainWindowHasDockedPane(container, qnsView)) {
+            YMCleanupMistyArtifactsForSkippedWindow(window);
+            YMRestoreQNSViewForSkippedWindow(qnsView);
+            return;
+        }
+
         YMMakeWindowTransparent(window);
         YMMakeContainerBlurCarrier(container);
         YMEnsureColorfulBlurBackgroundInContainer(container, qnsView);
+        if (YMNavigationGlassModeEnabled()) {
+            YMLiquidGlassNavigationAttach(container, qnsView);
+        } else {
+            YMLiquidGlassNavigationDetach(window);
+        }
         YMMakeViewTransparent(qnsView);
     }
     @finally {
@@ -699,12 +792,18 @@ static void YMRefreshAllWindows(void) {
 
     YMRegisterMistyThemeDefaults();
     if (!YMMistyModeEnabled()) {
+        // CGS 保活只属于迷离模式。
         [gYMBlurKeepAliveTimer invalidate];
         gYMBlurKeepAliveTimer = nil;
+    }
+    if (!YMThemeEffectEnabled()) {
         BOOL wasApplying = gYMApplyingBlurBackground;
         gYMApplyingBlurBackground = YES;
         for (id object in gYMModifiedThemeObjects.allObjects) {
             YMRestoreThemeObject(object);
+        }
+        for (NSWindow *window in NSApp.windows) {
+            YMLiquidGlassNavigationDetach(window);
         }
         gYMApplyingBlurBackground = wasApplying;
         return;
@@ -736,7 +835,7 @@ static void YMStartBlurKeepAliveIfNeeded(void) {
 #pragma mark - Runtime Hook：QNSView
 
 static BOOL YM_QNSView_isOpaque(id self, SEL _cmd) {
-    if (!YMMistyModeEnabled()) {
+    if (!YMThemeEffectEnabled()) {
         return gOrig_QNSView_isOpaque ? gOrig_QNSView_isOpaque(self, _cmd) : YES;
     }
     if ([self isKindOfClass:[NSView class]]) {
@@ -777,7 +876,7 @@ static void YM_QNSView_setLayer(id self, SEL _cmd, id layer) {
         gOrig_QNSView_setLayer(self, _cmd, layer);
     }
 
-    if (YMMistyModeEnabled() && !gYMApplyingBlurBackground && [self isKindOfClass:[NSView class]]) {
+    if (YMThemeEffectEnabled() && !gYMApplyingBlurBackground && [self isKindOfClass:[NSView class]]) {
         NSView *view = (NSView *)self;
         NSWindow *window = view.window;
 
@@ -860,13 +959,27 @@ static void YMInstallQNSViewHooks(void) {
 
 @implementation ThemeHook
 
++ (void)ym_observeAccessibilityDisplayOptions {
+    if (gYMAccessibilityObserver) return;
+    YMReadAccessibilityDisplayOptions();
+    gYMAccessibilityObserver = [NSWorkspace.sharedWorkspace.notificationCenter
+        addObserverForName:NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification
+                    object:nil
+                     queue:NSOperationQueue.mainQueue
+                usingBlock:^(__unused NSNotification *note) {
+        YMReadAccessibilityDisplayOptions();
+        [ThemeHook start];
+    }];
+}
+
 + (void)start {
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{ [self start]; });
         return;
     }
+    [self ym_observeAccessibilityDisplayOptions];
     YMRegisterMistyThemeDefaults();
-    if (!YMMistyModeEnabled()) {
+    if (!YMThemeEffectEnabled()) {
         YMRefreshAllWindows();
         return;
     }
@@ -880,7 +993,7 @@ static void YMInstallQNSViewHooks(void) {
     // Qt 可能延迟注册 QNSView；重试只安装一次，关闭后不重新应用主题。
     for (NSNumber *delay in @[@1, @3]) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (!YMMistyModeEnabled()) return;
+            if (!YMThemeEffectEnabled()) return;
             YMInstallQNSViewHooks();
             YMRefreshAllWindows();
         });

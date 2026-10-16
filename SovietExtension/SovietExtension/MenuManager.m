@@ -15,6 +15,8 @@
 #import "SidebarSettingsWindowController.h"
 #import "QuickQuit.h"
 #import "CaptureUnblock.h"
+#import "LiquidGlassNavigation.h"
+#import "ThemeHook.h"
 #import <objc/runtime.h>
 
 #ifndef kExitChatroomNickname
@@ -53,6 +55,56 @@ static void YMProtectAssistantMenuRole(void) {
 @property (nonatomic, strong) NSMenuItem *ym_mistyModeMenuItem;
 @property (nonatomic, strong) MistyModeSettingsWindowController *ym_mistySettingsWindowController;
 @property (nonatomic, strong) SidebarSettingsWindowController *ym_sidebarSettingsWindowController;
+@property (nonatomic, strong) NSMenuItem *ym_glassModeMenuItem;
+@property (nonatomic, strong) NSSlider *ym_glassTintSlider;
+@property (nonatomic, strong) NSTextField *ym_glassTintValueLabel;
+@end
+
+#pragma mark - 菜单内可拖动滑块
+
+// NSMenuItem 自定义 view 里的 NSSlider 在菜单跟踪模式下收不到自身的拖动循环，thumb 拖不动。
+// 这里让容器接管鼠标：hitTest 一律返回容器；mouseDown 跑一个本地事件循环（在
+// NSEventTrackingRunLoopMode 下取事件），每次按当前鼠标 x 直接算出 0–1 的值、驱动 slider
+// 显示并回调。坐标用全局鼠标位置换算，避免菜单窗口的事件归属歧义。
+@interface YMGlassTintSliderView : NSView
+@property (nonatomic, strong) NSSlider *slider;
+@property (nonatomic, copy) void (^onChange)(double value);
+@end
+
+@implementation YMGlassTintSliderView
+- (NSView *)hitTest:(NSPoint)point
+{
+    return [super hitTest:point] ? self : nil;  // 容器接管所有鼠标事件
+}
+- (void)ym_applyCurrentMouse
+{
+    if (!self.slider || !self.window) return;
+    const CGFloat inset = 8.0;  // 约半个 thumb 宽
+    NSRect f = self.slider.frame;
+    NSPoint screen = [NSEvent mouseLocation];
+    NSRect inWindow = [self.window convertRectFromScreen:NSMakeRect(screen.x, screen.y, 0, 0)];
+    CGFloat x = [self convertPoint:inWindow.origin fromView:nil].x;
+    CGFloat usable = NSWidth(f) - 2 * inset;
+    double frac = usable > 0 ? (x - (NSMinX(f) + inset)) / usable : 0.0;
+    if (frac < 0.0) frac = 0.0;
+    if (frac > 1.0) frac = 1.0;
+    double value = self.slider.minValue + frac * (self.slider.maxValue - self.slider.minValue);
+    self.slider.doubleValue = value;
+    if (self.onChange) self.onChange(value);
+}
+- (void)mouseDown:(NSEvent *)event
+{
+    (void)event;
+    [self ym_applyCurrentMouse];
+    while (YES) {
+        NSEvent *next = [NSApp nextEventMatchingMask:(NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp)
+                                           untilDate:[NSDate distantFuture]
+                                              inMode:NSEventTrackingRunLoopMode
+                                             dequeue:YES];
+        [self ym_applyCurrentMouse];
+        if (!next || next.type == NSEventTypeLeftMouseUp) break;
+    }
+}
 @end
 
 @implementation MenuManager
@@ -92,7 +144,7 @@ static void YMProtectAssistantMenuRole(void) {
     NSMenuItem *allowCaptureMenu = [self ym_toggleMenuItemWithTitle:@"允许截图主窗口"
                                                                 key:kAllowWindowCapture
                                                              action:@selector(onAllowWindowCapture:)];
-    
+
     BOOL separateRevoke = [[[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] isEqualToString:@"269079"];
     NSMenu *revokeGroupSub = [[NSMenu alloc] initWithTitle:@"消息撤回"];
     [revokeGroupSub addItem:[self ym_toggleMenuItemWithTitle:@"消息防撤回"
@@ -157,7 +209,7 @@ static void YMProtectAssistantMenuRole(void) {
                                                 keyEquivalent:@""
                                                         state:NO];
     
-    NSMenuItem *themeMenu = [self ym_createThemeModeMenu];
+    NSMenuItem *glassMenu = [self ym_createLiquidGlassMenuItem];
     NSMenuItem *sidebarMenu = [self ym_createSidebarMenu];
    
     NSString *version = [NSString stringWithFormat:@"当前版本 %@", kCurrentVersion];
@@ -169,11 +221,12 @@ static void YMProtectAssistantMenuRole(void) {
     currentVersionMenu.enabled = NO;
     
     NSMenu *subMenu = [[NSMenu alloc] initWithTitle:@"扩展"];
+    subMenu.autoenablesItems = NO;  // 项目的可用状态由各自 enabled 决定，避免被自动校验置灰
     [subMenu addItems:@[
         antiUpdateMenu,
         quickQuitMenu,
         allowCaptureMenu,
-        themeMenu,
+        glassMenu,
         sidebarMenu,
         revokeGroup,
         groupMenu,
@@ -302,6 +355,53 @@ static void YMProtectAssistantMenuRole(void) {
     [self ym_showMistyModeSettingsWindow:item];
 }
 
+- (NSView *)ym_liquidGlassTintSliderView
+{
+    YMGlassTintSliderView *container =
+        [[YMGlassTintSliderView alloc] initWithFrame:NSMakeRect(0, 0, 260, 48)];
+
+    NSTextField *title = [NSTextField labelWithString:@"玻璃强度"];
+    title.font = [NSFont menuFontOfSize:0];
+    title.textColor = NSColor.secondaryLabelColor;
+    title.frame = NSMakeRect(20, 26, 150, 16);
+    [container addSubview:title];
+
+    double strength = YMLiquidGlassNavigationIntensity();
+
+    NSTextField *value = [NSTextField labelWithString:[NSString stringWithFormat:@"%ld%%", (long)(strength * 100.0 + 0.5)]];
+    value.font = [NSFont menuFontOfSize:0];
+    value.textColor = NSColor.secondaryLabelColor;
+    value.alignment = NSTextAlignmentRight;
+    value.frame = NSMakeRect(180, 26, 60, 16);
+    [container addSubview:value];
+    self.ym_glassTintValueLabel = value;
+
+    // slider 仅作显示；拖动由容器的本地事件循环驱动（见 YMGlassTintSliderView）。
+    NSSlider *slider = [NSSlider sliderWithValue:strength minValue:0.0 maxValue:1.0 target:nil action:NULL];
+    slider.continuous = YES;
+    slider.frame = NSMakeRect(20, 6, 220, 20);
+    slider.toolTip = @"增强导航栏玻璃本身的折射强度（实验：私有材质旋钮，无着色；macOS 升级后可能失效）。0 = 系统默认，整体仍跟随系统“外观 → 液态玻璃”。";
+    [container addSubview:slider];
+    self.ym_glassTintSlider = slider;
+
+    container.slider = slider;
+    __weak MenuManager *weakSelf = self;
+    container.onChange = ^(double v) {
+        [weakSelf ym_applyGlassTintValue:v];
+    };
+
+    return container;
+}
+
+- (void)ym_applyGlassTintValue:(double)v
+{
+    if (v < 0.0) v = 0.0;
+    if (v > 1.0) v = 1.0;
+    [[NSUserDefaults standardUserDefaults] setDouble:v forKey:kThemeLiquidGlassNavigationIntensity];
+    self.ym_glassTintValueLabel.stringValue = [NSString stringWithFormat:@"%ld%%", (long)(v * 100.0 + 0.5)];
+    [ThemeHook refreshAllQNSViews];
+}
+
 - (void)onOpenSidebarSettings:(NSMenuItem *)item
 {
     (void)item;
@@ -333,30 +433,61 @@ static void YMProtectAssistantMenuRole(void) {
     return sidebarMenu;
 }
 
-#pragma mark - 主题模式 Menu
+#pragma mark - 液态玻璃导航栏 Menu
 
-- (NSMenuItem *)ym_createThemeModeMenu
+// 「液态玻璃导航栏」直接挂在扩展菜单下（不再有迷离模式 / 主题模式）。
+// 关闭时：无子菜单，点击即开启。开启时：带滑块的子菜单，hover 即展开调「玻璃强度」。
+- (NSMenuItem *)ym_createLiquidGlassMenuItem
 {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    BOOL mistyEnabled = [defaults boolForKey:kThemeMistyMode];
-    
-    NSMenuItem *mistyModeMenu = [NSMenuItem menuItemWithTitle:@"迷离模式  ▶"
-                                                       action:@selector(onMistyMode:)
-                                                       target:self
-                                                keyEquivalent:@""
-                                                        state:mistyEnabled];
-    self.ym_mistyModeMenuItem = mistyModeMenu;
-    
-    NSMenu *themeSubMenu = [[NSMenu alloc] initWithTitle:@"主题模式"];
-    [themeSubMenu addItem:mistyModeMenu];
-    
-    NSMenuItem *themeMenu = [[NSMenuItem alloc] init];
-    themeMenu.title = @"主题模式";
-    themeMenu.target = self;
-    themeMenu.enabled = YES;
-    themeMenu.submenu = themeSubMenu;
-    
-    return themeMenu;
+    NSMenuItem *item = [[NSMenuItem alloc] init];
+    item.title = @"液态玻璃导航栏";
+    item.target = self;
+    item.enabled = YES;
+    self.ym_glassModeMenuItem = item;
+    [self ym_configureLiquidGlassItem:item];
+    return item;
+}
+
+- (void)ym_configureLiquidGlassItem:(NSMenuItem *)item
+{
+    BOOL on = [[NSUserDefaults standardUserDefaults] boolForKey:kThemeLiquidGlassNavigation];
+    item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+    if (on) {
+        // 开启：子菜单里放「关闭」+ 滑块；有子菜单 → hover 展开。
+        NSMenu *sub = [[NSMenu alloc] initWithTitle:@"液态玻璃导航栏"];
+        sub.autoenablesItems = NO;  // 让滑块 view-item 与「关闭」始终可用
+        [sub addItem:[NSMenuItem menuItemWithTitle:@"关闭"
+                                            action:@selector(onLiquidGlassToggleOff:)
+                                            target:self
+                                     keyEquivalent:@""
+                                             state:NO]];
+        [sub addItem:[NSMenuItem separatorItem]];
+        NSMenuItem *sliderItem = [[NSMenuItem alloc] init];
+        sliderItem.view = [self ym_liquidGlassTintSliderView];
+        [sub addItem:sliderItem];
+        item.submenu = sub;
+        item.action = NULL;
+    } else {
+        // 关闭：无子菜单 → 点击触发开启。
+        item.submenu = nil;
+        item.action = @selector(onLiquidGlassToggleOn:);
+    }
+}
+
+- (void)onLiquidGlassToggleOn:(NSMenuItem *)sender
+{
+    (void)sender;
+    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kThemeLiquidGlassNavigation];
+    if (self.ym_glassModeMenuItem) [self ym_configureLiquidGlassItem:self.ym_glassModeMenuItem];
+    [ThemeHook refreshAllQNSViews];
+}
+
+- (void)onLiquidGlassToggleOff:(NSMenuItem *)sender
+{
+    (void)sender;
+    [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kThemeLiquidGlassNavigation];
+    if (self.ym_glassModeMenuItem) [self ym_configureLiquidGlassItem:self.ym_glassModeMenuItem];
+    [ThemeHook refreshAllQNSViews];
 }
 
 - (void)ym_showMistyModeSettingsWindow:(NSMenuItem *)item

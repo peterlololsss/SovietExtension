@@ -3270,6 +3270,14 @@ static BOOL YMNavigationSidebarPerformSave(
 
 @end
 
+// 供 LiquidGlassNavigation（迷离模式 2.0）复用：返回侧边栏主 hook 捕获到的导航栏
+// owner —— 即 60pt 主导航 QWidget（RUNTIME-EVIDENCE R6）。只读已持有的指针，不做
+// 任何捕获或改写；尚未捕获时返回 nullptr。导航玻璃那边会先校验 vtable 身份再使用。
+extern "C" __attribute__((visibility("default")))
+void *YMNavigationSidebarCapturedOwnerForLiquidGlass(void) {
+    return YMNavigationSidebarOwner.load(std::memory_order_acquire);
+}
+
 __attribute__((constructor))
 static void YMNavigationSidebarEntry(void) {
     @autoreleasepool {
