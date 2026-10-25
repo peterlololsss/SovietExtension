@@ -39,18 +39,32 @@ BOOL YMLiquidGlassNavigationIdentityVerified(void);
 /// 窗口是否像主窗口（足够大，能容纳导航栏 + 会话列表 + 聊天区）。
 BOOL YMLiquidGlassNavigationWindowEligible(NSWindow *window);
 
-/// 承载导航栏 owner 的主窗 QNSView（外层父 detour 首次安装时锁定）。
-/// 导航栏玻璃只对这一个窗口做透明化；朋友圈 / 大图预览等其它窗口一律保持不透明。
-/// 尚未锁定时返回 nil。
-NSView *_Nullable YMLiquidGlassNavigationMainQNSView(void);
+/// 按导航栏 owner 重新定位承载导航栏的主窗 QNSView（owner → 顶层 QWidget → winid），
+/// 并更新缓存。导航栏玻璃只对这一个窗口做透明化；朋友圈 / 大图预览等其它窗口一律保持
+/// 不透明。找不到（身份未通过、owner 尚未捕获、主窗重建中）时返回 nil。只在主线程调用。
+NSView *_Nullable YMLiquidGlassNavigationResolveHostQNSView(void);
 
-/// 在 qnsView 之后放置或更新导航栏玻璃，以及覆盖其余区域的不透明背板。
+/// 最近一次定位的结果（缓存，弱引用），给 isOpaque 这类高频路径用。
+NSView *_Nullable YMLiquidGlassNavigationHostQNSView(void);
+
+/// 自上次调用以来主窗（QNSView 或其所在 NSWindow）是否换过；调用即清除标记。
+BOOL YMLiquidGlassNavigationConsumeHostChange(void);
+
+/// 找不到主窗时调用：外层父 widget 恢复自己的背景填充，导航栏回到微信原本的不透明外观，
+/// 不会露出一条背后没有玻璃的透明导航栏。下次挂上玻璃时自动重新跳过。
+void YMLiquidGlassNavigationSuspendFillSuppression(void);
+
+/// 在 qnsView 之后放置或更新导航栏玻璃，以及覆盖其余区域的不透明背板；
+/// 其它容器里残留的本模块 view 会一并移除。
 void YMLiquidGlassNavigationAttach(NSView *container, NSView *qnsView);
 
-/// 仅移除本窗口里由本模块插入的 view（玻璃 / 背板 / 背衢），**不**触碰全局
+/// 仅移除本窗口里由本模块插入的 view（玻璃 / 背板 / 背衬），**不**触碰全局
 /// detour / 填充抑制状态。供「清理被跳过 / 其它窗口」这类按窗口的还原路径调用，
 /// 避免一个无关窗口（朋友圈 / 大图预览）的 view churn 把主窗的全局玻璃拆掉。
 void YMLiquidGlassNavigationRemoveViews(NSWindow *_Nullable window);
+
+/// 移除所有窗口里本模块插入、但不在 keepContainer 里的 view（keepContainer 为 nil 时全部移除）。
+void YMLiquidGlassNavigationRemoveStaleViews(NSView *_Nullable keepContainer);
 
 /// 移除窗口里由本模块插入的所有 view。
 void YMLiquidGlassNavigationDetach(NSWindow *_Nullable window);

@@ -403,6 +403,14 @@ static BOOL YMShouldSkipMistyEffectForWindow(NSWindow *window) {
         return YES;
     }
 
+    // 导航栏玻璃只处理承载导航栏的那一个主窗（按导航栏 owner 反查，主窗重建后自动跟上）。
+    // 朋友圈 / 大图预览等其它顶层窗口一旦被透明化就会透穿成空白（回归：点开朋友圈图片后
+    // 主窗全白），所以一律跳过、保持不透明；还没定位到主窗时（启动早期、主窗重建中）同样全跳过。
+    if (!YMMistyModeEnabled()) {
+        NSView *host = YMLiquidGlassNavigationHostQNSView();
+        return !host || host.window != window || !YMLiquidGlassNavigationWindowEligible(window);
+    }
+
     NSString *className = NSStringFromClass(window.class);
     NSArray<NSString *> *blockedKeywords = @[
         @"Status",
@@ -448,20 +456,6 @@ static BOOL YMShouldSkipMistyEffectForWindow(NSWindow *window) {
     // 这里阈值故意放低，避免把微信登录窗口误判掉。
     if (frame.size.width < 220.0 || frame.size.height < 120.0) {
         return YES;
-    }
-
-    // 导航栏玻璃只用于主窗口大小的窗口，而且只用于承载导航栏 owner 的那一个主窗。
-    if (!YMMistyModeEnabled()) {
-        if (!YMLiquidGlassNavigationWindowEligible(window)) {
-            return YES;
-        }
-        // 朋友圈 / 大图预览等其它顶层窗口一旦被透明化就会透穿成空白（回归：点开朋友圈
-        // 图片后主窗全白），所以这里把它们全部跳过、保持不透明。主窗在外层父 detour 首次
-        // 安装时锁定；未锁定前（启动早期）放行，让主窗能被处理并完成锁定。
-        NSView *mainQNS = YMLiquidGlassNavigationMainQNSView();
-        if (mainQNS && mainQNS.window && mainQNS.window != window) {
-            return YES;
-        }
     }
 
     return NO;
@@ -598,9 +592,9 @@ static void YMRestoreThemeObject(id object) {
     } else if ([object isKindOfClass:NSView.class]) {
         NSView *view = object;
         YMRemoveColorfulBlurBackgroundViewsInTree(view);
-        // 还原单个 view 是个偶发事件（任何窗口的 QNSView churn 都会触发），所以只能移除
-        // 该窗口的 view，绝不能拆全局 detour / 填充（否则朋友圈点图会把主窗弄白）。
-        YMLiquidGlassNavigationRemoveViews(view.window);
+        // 导航栏玻璃不在这里移除：还原单个 view 是个偶发事件（任何窗口的 QNSView churn 都会
+        // 触发），顺手删掉所在窗口的玻璃，就会留下「窗口仍透明、填充仍被跳过、背后却没有玻璃」
+        // 的纯透明导航栏。玻璃只由主窗容器统一管理（挂载 / 暂歇 / 清残留）。
         view.alphaValue = [state[@"alpha"] doubleValue];
         view.wantsLayer = [state[@"wantsLayer"] boolValue];
         view.needsDisplay = YES;
@@ -627,12 +621,12 @@ static NSColor *YMWindowBlurCarrierColor(void) {
 static void YMMakeWindowTransparent(NSWindow *window) {
     if (!window) return;
 
-    // 防御纵深：导航栏玻璃模式下绝不透明化非主窗（该分支正常不应触发，触发即说明
+    // 防御纵深：导航栏玻璃模式下只透明化承载导航栏的主窗（该分支正常不应触发，触发即说明
     // 有路径绕过了 YMShouldSkipMistyEffectForWindow）。
     if (!YMMistyModeEnabled()) {
-        NSView *mainQNS = YMLiquidGlassNavigationMainQNSView();
-        if (mainQNS && mainQNS.window && mainQNS.window != window) {
-            NSLog(@"[YMLiquidGlass] WARN refusing to transparentize non-main window %@ %@",
+        NSView *host = YMLiquidGlassNavigationHostQNSView();
+        if (!host || host.window != window) {
+            NSLog(@"[YMLiquidGlass] WARN refusing to transparentize non-host window %@ %@",
                   NSStringFromClass(window.class), NSStringFromRect(window.frame));
             return;
         }
@@ -716,6 +710,16 @@ static void YMInstallBlurBackgroundBehindQNSView(NSView *qnsView) {
     @try {
         NSWindow *window = qnsView.window;
         if (!window) return;
+
+        // 导航栏玻璃只改写导航栏所在主窗的那一个 QNSView。主窗里的原生子 QNSView、其它窗口的
+        // QNSView 都保持原样（以前改过的照样还原）；玻璃只挂在主窗 QNSView 的容器里，这里不动它。
+        if (!YMMistyModeEnabled() && qnsView != YMLiquidGlassNavigationResolveHostQNSView()) {
+            if (!YMShouldApplyMistyEffectForWindow(window)) {
+                YMCleanupMistyArtifactsForSkippedWindow(window);
+            }
+            YMRestoreQNSViewForSkippedWindow(qnsView);
+            return;
+        }
 
         // 只跳过 macOS 顶部状态栏图标、菜单、popover 等附属窗口。
         // 不跳过登录窗口，避免登录界面的迷离效果失效。
@@ -809,9 +813,25 @@ static void YMRefreshAllWindows(void) {
         return;
     }
 
+    // 导航栏玻璃：先按导航栏 owner 重新定位主窗；这一遍本身就是整体重新应用，顺带消费「主窗
+    // 变了」标记。找不到主窗时让微信自己的背景画回来，不留一条背后没有玻璃的透明导航栏。
+    if (!YMMistyModeEnabled()) {
+        if (!YMLiquidGlassNavigationResolveHostQNSView()) {
+            YMLiquidGlassNavigationSuspendFillSuppression();
+        }
+        (void)YMLiquidGlassNavigationConsumeHostChange();
+    }
+
     for (NSWindow *window in NSApp.windows) {
         if (!YMShouldApplyMistyEffectForWindow(window)) {
             YMCleanupMistyArtifactsForSkippedWindow(window);
+            continue;
+        }
+
+        // 导航栏玻璃：主窗交给 YMInstallBlurBackgroundBehindQNSView，它先看停靠面板再决定
+        // 要不要透明化，避免先透明、后还原的闪白。
+        if (!YMMistyModeEnabled()) {
+            YMRefreshViewTree(window.contentView);
             continue;
         }
 
@@ -830,13 +850,24 @@ static void YMBlurKeepAliveTick(void) {
         YMRefreshAllWindows();
         return;
     }
-    // 导航栏玻璃模式：只重新评估被锁定的主窗 QNSView。朋友圈等停靠面板关闭后，主窗
-    // QNSView 未必再产生 churn 事件（viewDidMoveTo* / setLayer），玻璃就卡在暂歇态
-    // 回不来；靠这个轮询把它重新挂回去。面板还在时仍会命中 YMMainWindowHasDockedPane
-    // 保持暂歇、保持窗口不透明，不会整窗透明化（所以不走 YMRefreshAllWindows，避免闪白）。
+    // 导航栏玻璃模式：每次都按导航栏 owner 重新定位主窗。微信会销毁重建主窗、Qt 也会把
+    // QNSView 搬进新的 NSWindow；只在启动时锁定一次的话，主窗一换玻璃就丢了，导航栏的背景
+    // 填充却仍被跳过，只剩一条纯透明的导航栏。
+    //   · 主窗变了：整体重新应用一遍（旧窗口还原、残留玻璃清掉、新主窗挂上玻璃）。
+    //   · 主窗没变：只重新评估它的 QNSView。朋友圈等停靠面板关闭后，主窗 QNSView 未必再产生
+    //     churn 事件（viewDidMoveTo* / setLayer），玻璃就卡在暂歇态回不来；靠这个轮询挂回去。
+    //     面板还在时仍会命中 YMMainWindowHasDockedPane 保持暂歇、保持窗口不透明。
+    //   · 找不到主窗：让微信自己的背景画回来，并清掉各处残留的玻璃。
     if (!YMNavigationGlassModeEnabled()) return;
-    NSView *mainQNS = YMLiquidGlassNavigationMainQNSView();
-    if (mainQNS) YMInstallBlurBackgroundBehindQNSView(mainQNS);
+    NSView *host = YMLiquidGlassNavigationResolveHostQNSView();
+    if (YMLiquidGlassNavigationConsumeHostChange()) {
+        YMRefreshAllWindows();
+    } else if (host) {
+        YMInstallBlurBackgroundBehindQNSView(host);
+    } else {
+        YMLiquidGlassNavigationSuspendFillSuppression();
+        YMLiquidGlassNavigationRemoveStaleViews(nil);
+    }
 }
 
 static void YMStartBlurKeepAliveIfNeeded(void) {
@@ -855,7 +886,10 @@ static BOOL YM_QNSView_isOpaque(id self, SEL _cmd) {
     }
     if ([self isKindOfClass:[NSView class]]) {
         NSWindow *window = ((NSView *)self).window;
-        if (window && !YMShouldApplyMistyEffectForWindow(window)) {
+        // 导航栏玻璃模式只有主窗那一个 QNSView 不透明为 NO（高频路径，用缓存的定位结果）。
+        const BOOL untouched = (window && !YMShouldApplyMistyEffectForWindow(window)) ||
+                               (!YMMistyModeEnabled() && self != YMLiquidGlassNavigationHostQNSView());
+        if (untouched) {
             if (gOrig_QNSView_isOpaque) {
                 return gOrig_QNSView_isOpaque(self, _cmd);
             }
@@ -898,7 +932,9 @@ static void YM_QNSView_setLayer(id self, SEL _cmd, id layer) {
         // window 还没绑定时不要提前改透明度。
         // 图片预览窗口的 QNSView 可能先 setLayer、后绑定到 PreviewWindow；
         // 如果这里在 window == nil 时先改 alpha，后面即使过滤 PreviewWindow，也会造成图片预览发虚。
-        if (window && YMShouldApplyMistyEffectForWindow(window)) {
+        // 导航栏玻璃模式只改写导航栏所在主窗的那一个 QNSView。
+        const BOOL themedView = YMMistyModeEnabled() || view == YMLiquidGlassNavigationResolveHostQNSView();
+        if (window && themedView && YMShouldApplyMistyEffectForWindow(window)) {
             YMMakeViewTransparent(view);
             YMInstallBlurBackgroundBehindQNSViewAsync(view);
         } else if (window) {

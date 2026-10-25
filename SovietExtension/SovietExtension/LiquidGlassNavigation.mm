@@ -195,13 +195,14 @@ bool YMNavRailOwnerMatches(void *owner) {
            vtable == gYMNavRailExpectedVtable;
 }
 
+void YMNavRailRestoreFill(void);
+
 void YMNavRailSuppressFill(void) {
     if (gYMNavRailExpectedVtable == 0) return;  // 身份未通过
     YMNavRailOwnerGetter getter = YMNavRailResolveOwnerGetter();
     if (getter == nullptr) return;  // 侧边栏访问器不可用
     void *owner = getter();
-    if (owner == nullptr || owner == gYMNavRailSuppressedOwner) return;
-    if (!YMNavRailOwnerMatches(owner)) return;
+    if (owner == nullptr || !YMNavRailOwnerMatches(owner)) return;
 
     const std::uintptr_t flagAddress =
         reinterpret_cast<std::uintptr_t>(owner) + kYMNavRailFillFlagOffset;
@@ -213,6 +214,13 @@ void YMNavRailSuppressFill(void) {
     if (!YMNavRailReadMemory(flagAddress, &flag, sizeof(flag)) ||
         !YMNavRailReadMemory(colorAddress, &color, sizeof(color))) {
         return;
+    }
+    // 看字段本身而不是只比地址：主窗重建后新导航栏常常分配在旧实例的同一地址上，微信也可能
+    // 重新写回背景色；这两种情况字段都已非零，需要重新快照、重新清零。
+    if (owner == gYMNavRailSuppressedOwner && flag == 0 && color == 0) return;
+    // owner 换成了新实例：先还原旧实例的字段（已销毁的话 vtable 校验不过，自动跳过）。
+    if (gYMNavRailSuppressedOwner != nullptr && gYMNavRailSuppressedOwner != owner) {
+        YMNavRailRestoreFill();
     }
     const std::uint32_t zeroFlag = 0;
     const std::uintptr_t zeroColor = 0;
@@ -296,21 +304,29 @@ YMNavParentDetourFn YMNavParentResolveDetour(void) {
     return fn;
 }
 
-// owner 的 Qt 父对象指针：*(*(owner+0x8)+0x10)。任何一步读失败或为空都返回 nullptr。
-void *YMNavParentResolveOuterParent(void *owner) {
-    if (owner == nullptr) return nullptr;
+// obj 的 Qt 父对象：*(*(obj+0x8)+0x10)。读失败返回 false；顶层对象（没有父）返回 true，
+// *parent 为 nullptr。
+bool YMQtReadParent(void *obj, void **parent) {
+    *parent = nullptr;
+    if (obj == nullptr) return false;
     std::uintptr_t dptr = 0;
-    if (!YMNavRailReadMemory(reinterpret_cast<std::uintptr_t>(owner) + kYMQObjectDPtrOffset,
+    if (!YMNavRailReadMemory(reinterpret_cast<std::uintptr_t>(obj) + kYMQObjectDPtrOffset,
                              &dptr, sizeof(dptr)) ||
         dptr == 0) {
-        return nullptr;
+        return false;
     }
-    std::uintptr_t parent = 0;
-    if (!YMNavRailReadMemory(dptr + kYMQObjectDataParentOffset, &parent, sizeof(parent)) ||
-        parent == 0) {
-        return nullptr;
+    std::uintptr_t value = 0;
+    if (!YMNavRailReadMemory(dptr + kYMQObjectDataParentOffset, &value, sizeof(value))) {
+        return false;
     }
-    return reinterpret_cast<void *>(parent);
+    *parent = reinterpret_cast<void *>(value);
+    return true;
+}
+
+// owner 的 Qt 父对象指针。任何一步读失败或为空都返回 nullptr。
+void *YMNavParentResolveOuterParent(void *owner) {
+    void *parent = nullptr;
+    return YMQtReadParent(owner, &parent) ? parent : nullptr;
 }
 
 // 确认对象首字（vptr）是期望的外层父 vtable。
@@ -430,7 +446,48 @@ void YMNavParentSuppressRemove(void) {
     YMNavParentReleaseTrampoline();
 }
 
+#pragma mark - 导航栏所在主窗定位
+
+// 上面两步都按「当前 owner」这一个 Qt 实例生效，玻璃却挂在 AppKit 侧的容器里；两边必须落在
+// 同一个窗口，否则就是「填充已跳过、背后却没有玻璃」的纯透明导航栏。微信会销毁并重建主窗
+// （侧边栏 hook 的 mainWindowDestructor 就是为此），Qt 也会把 QNSView 搬进新的 NSWindow，
+// 所以主窗不能在启动时锁定一次了事，而是每次都从 owner 反查：
+//   owner → 逐级 Qt 父对象 → 顶层 QWidget → QWidget::data(+0x28) → QWidgetData::winid(+0)
+// Qt 5.15 的 QWidget = QObject(vptr, d_ptr) + QPaintDevice(vptr, painters, reserved)，之后
+// 才是 data 指针；顶层原生窗口的 winid 就是它的 QNSView（QCocoaWindow::winId）。进程内已
+// 验证：导航栏 owner 的顶层 FramelessMainWindow 的 winid == 主窗 contentView。
+constexpr std::uintptr_t kYMQWidgetDataOffset = 0x28;
+constexpr int kYMQtParentWalkLimit = 32;
+
+// widget 所在顶层 QWidget 的 winid；任何一步读失败、链过长或不是原生窗口都返回 0。
+std::uintptr_t YMQtTopLevelWinId(void *widget) {
+    void *node = widget;
+    for (int depth = 0; node != nullptr && depth < kYMQtParentWalkLimit; ++depth) {
+        void *parent = nullptr;
+        if (!YMQtReadParent(node, &parent)) return 0;
+        if (parent != nullptr) {
+            node = parent;
+            continue;
+        }
+        std::uintptr_t data = 0;
+        std::uintptr_t winid = 0;
+        if (!YMNavRailReadMemory(reinterpret_cast<std::uintptr_t>(node) + kYMQWidgetDataOffset,
+                                 &data, sizeof(data)) ||
+            data == 0 || !YMNavRailReadMemory(data, &winid, sizeof(winid))) {
+            return 0;
+        }
+        return winid;
+    }
+    return 0;
+}
+
 }  // namespace
+
+#if SOVEXT_LIQUID_GLASS_TESTING
+extern "C" std::uintptr_t YMLiquidGlassNavigationTopLevelWinIdForTesting(void *widget) {
+    return YMQtTopLevelWinId(widget);
+}
+#endif
 
 #pragma mark - 身份校验
 
@@ -527,12 +584,68 @@ static NSView *YMLiquidGlassFindDirectSubview(NSView *container, NSString *ident
     return nil;
 }
 
-// 外层父 detour 首次安装成功的那一次，锁定承载导航栏 owner 的主窗 QNSView。导航栏玻璃
-// 只对这个窗口透明化，其它窗口（朋友圈、大图预览…）不碰。弱引用，窗口销毁即自动置空。
-static __weak NSView *gYMNavGlassMainQNSView = nil;
+static BOOL YMLiquidGlassIsOurView(NSView *view) {
+    NSString *identifier = view.identifier;
+    return [identifier isEqualToString:kYMNavigationGlassIdentifier] ||
+           [identifier isEqualToString:kYMNavigationBackplateIdentifier] ||
+           [identifier isEqualToString:kYMNavigationBackdropIdentifier];
+}
 
-NSView *YMLiquidGlassNavigationMainQNSView(void) {
-    return gYMNavGlassMainQNSView;
+// 最近一次定位到的主窗 QNSView（弱引用），以及它和它所在 NSWindow 的地址：地址一变，说明
+// 主窗被重建或 QNSView 换了窗口，调用方需要整体重新应用一遍。
+static __weak NSView *gYMNavGlassHostQNSView = nil;
+static std::uintptr_t gYMNavGlassHostToken = 0;
+static std::uintptr_t gYMNavGlassHostWindowToken = 0;
+static BOOL gYMNavGlassHostChanged = NO;
+
+NSView *YMLiquidGlassNavigationResolveHostQNSView(void) {
+    NSView *host = nil;
+    YMNavRailOwnerGetter getter = YMNavRailResolveOwnerGetter();
+    void *owner = getter != nullptr ? getter() : nullptr;
+    // 身份未通过时期望 vtable 为 0，owner 校验同样不过。
+    const std::uintptr_t winid = YMNavRailOwnerMatches(owner) ? YMQtTopLevelWinId(owner) : 0;
+    if (winid != 0) {
+        // 读出来的 winid 只拿来和现存窗口的 contentView 比地址，绝不直接当对象用。
+        for (NSWindow *window in NSApp.windows) {
+            NSView *content = window.contentView;
+            if (content && reinterpret_cast<std::uintptr_t>((__bridge void *)content) == winid) {
+                host = content;
+                break;
+            }
+        }
+    }
+    const std::uintptr_t token = reinterpret_cast<std::uintptr_t>((__bridge void *)host);
+    const std::uintptr_t windowToken = reinterpret_cast<std::uintptr_t>((__bridge void *)host.window);
+    if (token != gYMNavGlassHostToken || windowToken != gYMNavGlassHostWindowToken) {
+        gYMNavGlassHostToken = token;
+        gYMNavGlassHostWindowToken = windowToken;
+        gYMNavGlassHostChanged = YES;
+        const NSRect frame = host.window.frame;
+        NSLog(@"[YMLiquidGlass] navigation host %@ (window #%ld, %.0fx%.0f)",
+              host ? @"located" : @"lost", (long)host.window.windowNumber,
+              NSWidth(frame), NSHeight(frame));
+    }
+    gYMNavGlassHostQNSView = host;
+    return host;
+}
+
+NSView *YMLiquidGlassNavigationHostQNSView(void) {
+    return gYMNavGlassHostQNSView;
+}
+
+BOOL YMLiquidGlassNavigationConsumeHostChange(void) {
+    const BOOL changed = gYMNavGlassHostChanged;
+    gYMNavGlassHostChanged = NO;
+    return changed;
+}
+
+void YMLiquidGlassNavigationSuspendFillSuppression(void) {
+    // detour 留着，只是不再命中任何实例：外层父 widget 照常填充 x0–60，导航栏回到微信原本的
+    // 不透明外观（导航栏自身字段清零单独看不出变化）。不往可能已销毁的 owner 写内存。
+    if (gYMNavParentPaintTarget != nullptr) {
+        gYMNavParentPaintTarget = nullptr;
+        NSLog(@"[YMLiquidGlass] nav parent fill skip suspended (no host)");
+    }
 }
 
 void YMLiquidGlassNavigationAttach(NSView *container, NSView *qnsView) {
@@ -586,43 +699,51 @@ void YMLiquidGlassNavigationAttach(NSView *container, NSView *qnsView) {
     // 去掉导航栏自身的不透明背景填充（按实例、可逆、身份 + vtable 门控）。
     YMNavRailSuppressFill();
     // 再让外层父 widget 在 x0–60 跳过填充（入口 detour，身份 + 父 vtable + 字节签名门控）。
-    const bool parentWasInstalled = gYMNavParentPatchInstalled;
     YMNavParentSuppressInstall();
-    // detour 由「未安装」变「已安装」的唯一那次，正是启动时带导航栏 owner 的主窗（此
-    // 刻朋友圈等窗口还不存在）。锁定它的 QNSView，之后只有这个窗口会被透明化。
-    if (!parentWasInstalled && gYMNavParentPatchInstalled) {
-        gYMNavGlassMainQNSView = qnsView;
-        NSLog(@"[YMLiquidGlass] main window pinned (qnsView=%@ window=%@)",
-              qnsView, qnsView.window);
-    }
+    // 玻璃只应存在于这一个容器：主窗重建 / QNSView 换窗口之后，旧容器里残留的那套一并清掉。
+    YMLiquidGlassNavigationRemoveStaleViews(container);
 }
 
-static void YMLiquidGlassRemoveInTree(NSView *view) {
+// 窗口自己的视图树根，通常是 contentView 的父视图（NSThemeFrame）。微信会把一些窗口的
+// contentView 嵌进别的窗口（FlueEmbeddedWindow 的内容就挂在主窗 QNSView 里），这时只取
+// contentView 本身，免得顺着它爬进主窗、误删主窗的玻璃。
+static NSView *YMLiquidGlassWindowRoot(NSWindow *window) {
+    NSView *content = window.contentView;
+    NSView *frameView = content.superview;
+    if (frameView && frameView.superview == nil && frameView.window == window) return frameView;
+    return content;
+}
+
+// 移除 view 子树里本模块插入的 view；keep 容器里的那一套保留。
+static void YMLiquidGlassRemoveInTree(NSView *view, NSView *keep) {
     for (NSView *subview in [view.subviews copy]) {
-        if ([subview.identifier isEqualToString:kYMNavigationGlassIdentifier] ||
-            [subview.identifier isEqualToString:kYMNavigationBackplateIdentifier] ||
-            [subview.identifier isEqualToString:kYMNavigationBackdropIdentifier]) {
-            [subview removeFromSuperview];
+        if (YMLiquidGlassIsOurView(subview)) {
+            if (view != keep) [subview removeFromSuperview];
             continue;
         }
-        YMLiquidGlassRemoveInTree(subview);
+        YMLiquidGlassRemoveInTree(subview, keep);
     }
 }
 
 void YMLiquidGlassNavigationRemoveViews(NSWindow *window) {
     // 只移除本窗口里本模块插入的 view，不动任何全局状态。
-    NSView *root = window.contentView.superview ?: window.contentView;
-    if (root) YMLiquidGlassRemoveInTree(root);
+    NSView *root = window ? YMLiquidGlassWindowRoot(window) : nil;
+    if (root) YMLiquidGlassRemoveInTree(root, nil);
+}
+
+void YMLiquidGlassNavigationRemoveStaleViews(NSView *keepContainer) {
+    for (NSWindow *window in NSApp.windows) {
+        NSView *root = YMLiquidGlassWindowRoot(window);
+        if (root) YMLiquidGlassRemoveInTree(root, keepContainer);
+    }
 }
 
 void YMLiquidGlassNavigationDetach(NSWindow *window) {
-    // 全局拆除：卸载外层父 detour（恢复入口字节）+ 还原导航栏自身背景字段 +
-    // 解除主窗锁定，再移除本模块插入的 view。**只应在功能真正关闭时调用**（迷离 /
-    // 导航栏玻璃都不再改写）。「清理其它 / 被跳过窗口」只调用 YMLiquidGlassNavigationRemoveViews，
-    // 绝不走这里——否则一个无关窗口的 view churn 会把主窗的全局玻璃拆掉（朋友圈点图变
-    // 空白的根因）。即使没有 window 也要全部还原。
+    // 全局拆除：卸载外层父 detour（恢复入口字节）+ 还原导航栏自身背景字段，再移除本模块
+    // 插入的 view。**只应在功能真正关闭时调用**（迷离 / 导航栏玻璃都不再改写）。「清理其它 /
+    // 被跳过窗口」只调用 YMLiquidGlassNavigationRemoveViews，绝不走这里——否则一个无关窗口的
+    // view churn 会把主窗的全局玻璃拆掉（朋友圈点图变空白的根因）。即使没有 window 也要全部还原。
     YMNavParentSuppressRemove();
     YMNavRailRestoreFill();
-    gYMNavGlassMainQNSView = nil;
     YMLiquidGlassNavigationRemoveViews(window);
 }
