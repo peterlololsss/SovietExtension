@@ -41,6 +41,7 @@
 #include <cstddef>
 #include <mutex>
 #include "GroupExitSubscription.h"
+#include "DebuggerCheckMask.h"
 
 #pragma mark - 全局状态
 
@@ -79,6 +80,8 @@ static std::atomic_bool YMFeatureGroupExitMonitorEnabled(false);
 static std::atomic_bool YMFeatureGroupExitNicknameEnabled(false);
 static std::atomic_bool YMFeatureOpenURLWithSystemBrowserEnabled(false);
 static BOOL YMFeatureAutoLoginEnabled = NO;
+static BOOL YMFeatureMaskDebuggerCheckEnabled = NO;
+static BOOL YMHasMaskedDebuggerCheck = NO;
 
 //static const uintptr_t YMMultiOpenTryPreventMultiInstanceVA = 0x1C0A64;
 
@@ -5270,7 +5273,37 @@ static void YMInstallOpenURLWithSystemBrowserPatch(void) {
     YMFindAndPatchLoadedOpenURLWithSystemBrowserDylib();
 }
 
-#pragma mark - tool
+#pragma mark - Local debugger state check
+static BOOL YMCanMaskDebuggerCheck(void) {
+    const YMWeChatAdaptProfile *profile = YMGetActiveProfile();
+    if (!profile || strcmp(profile->buildVersion, "269079") != 0 ||
+        !YMMatchesWeChat269079Dylib()) return NO;
+    std::array<uint32_t, 8> entry{};
+    return YMSafeReadMemory(YMRuntimeAddress(ym::debugger::kCheckAddress),
+                            entry.data(), sizeof(entry)) &&
+           ym::debugger::MatchesOriginalEntry(entry);
+}
+
+static void YMInstallDebuggerCheckMask(void) {
+    if (!YMFeatureMaskDebuggerCheckEnabled || YMHasMaskedDebuggerCheck) return;
+    if (!YMCanMaskDebuggerCheck()) {
+        YMLog(@"[DebuggerCheckMask] unavailable: image identity or entry mismatch");
+        return;
+    }
+    const uintptr_t address = YMRuntimeAddress(ym::debugger::kCheckAddress);
+    // 启动阶段安装；菜单仅保存下次启动的设置，不在运行中热写代码页。
+    BOOL written = YMGroupExitWriteCodeBytes(address,
+        reinterpret_cast<const uint8_t *>(ym::debugger::kMaskedEntry.data()),
+        sizeof(ym::debugger::kMaskedEntry), "local debugger check", "startup mask");
+    std::array<uint32_t, 2> current{};
+    YMHasMaskedDebuggerCheck = written &&
+        YMSafeReadMemory(address, current.data(), sizeof(current)) &&
+        current == ym::debugger::kMaskedEntry;
+    YMLog(@"[DebuggerCheckMask] startup result=%@", YMHasMaskedDebuggerCheck ? @"OK" : @"FAIL");
+}
+
+#pragma mark - dyld image loading
+
 static void YMDyldImageAdded(const struct mach_header *mh, intptr_t vmaddr_slide) {
     const char *name = NULL;
 
@@ -5297,6 +5330,7 @@ static void YMDyldImageAdded(const struct mach_header *mh, intptr_t vmaddr_slide
           (unsigned long)vmaddr_slide);
 
     YMRecordWeChatDylibSlide(vmaddr_slide, @"dyld add image callback");
+    YMInstallDebuggerCheckMask();
     YMInstallMessageMenuPatch();
 
     /*
@@ -5433,6 +5467,7 @@ static void YMLoadFeatureSwitchesFromDefaults(void) {
 
     YMFeatureOpenURLWithSystemBrowserEnabled = [defaults boolForKey:kUseSystemWeb];
     YMFeatureAutoLoginEnabled = [defaults boolForKey:kAutoLogin];
+    YMFeatureMaskDebuggerCheckEnabled = [defaults boolForKey:kMaskDebuggerCheck];
 
     YMLog(@"feature switches antiUpdate=%@ antiRevoke=%@ groupExit=%@ groupExitNickname=%@ systemWeb=%@ autoLogin=%@",
           YMFeatureAntiUpdateEnabled ? @"ON" : @"OFF",
@@ -5448,6 +5483,12 @@ YMFeatureApplyResult YMApplyFeatureSetting(NSString *key, BOOL enabled) {
     if ([key isEqualToString:kAntiUpdate]) return enabled == YMFeatureAntiUpdateEnabled ? YMFeatureApplied : YMFeatureNeedsRestart;
     if ([key isEqualToString:kQuickQuit]) return YMSetQuickQuitEnabled(enabled) ? YMFeatureApplied : YMFeatureUnavailable;
     if ([key isEqualToString:kAllowWindowCapture]) return YMSetAllowWindowCaptureEnabled(enabled) ? YMFeatureApplied : YMFeatureUnavailable;
+    if ([key isEqualToString:kMaskDebuggerCheck]) {
+        if (enabled == YMFeatureMaskDebuggerCheckEnabled)
+            return enabled && !YMHasMaskedDebuggerCheck ? YMFeatureUnavailable : YMFeatureApplied;
+        if (enabled && !YMCanMaskDebuggerCheck()) return YMFeatureUnavailable;
+        return YMFeatureNeedsRestart;
+    }
     if ([key isEqualToString:kAutoLogin] || [key isEqualToString:kRevokeForwardToSelfRealSend] ||
         [key isEqualToString:kRevokeForwardOthers] || [key isEqualToString:kRevokeForwardSelf]) {
         return YMFeatureApplied;

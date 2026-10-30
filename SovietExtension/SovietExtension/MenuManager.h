@@ -25,6 +25,7 @@ static NSString *kIsFirstLoad = @"kIsFirstLoad.SOVIET";
 static NSString *kAutoLogin = @"kAutoLogin.SOVIET";
 static NSString *kQuickQuit = @"kQuickQuit.SOVIET";
 static NSString *kAllowWindowCapture = @"kAllowWindowCapture.SOVIET";
+static NSString *kMaskDebuggerCheck = @"kMaskDebuggerCheck.SOVIET";
 static NSString *kCurrentVersion = @"1.4.3";
 
 @interface MenuManager : NSObject

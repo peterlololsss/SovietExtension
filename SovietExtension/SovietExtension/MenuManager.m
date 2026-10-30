@@ -132,6 +132,7 @@ static void YMProtectAssistantMenuRole(void) {
     YMSetQuickQuitEnabled([[NSUserDefaults standardUserDefaults] boolForKey:kQuickQuit]);
     [self ym_registerDefaultBool:NO forKey:kAllowWindowCapture];
     YMSetAllowWindowCaptureEnabled([[NSUserDefaults standardUserDefaults] boolForKey:kAllowWindowCapture]);
+    [self ym_registerDefaultBool:NO forKey:kMaskDebuggerCheck];
 
     NSMenuItem *antiUpdateMenu = [self ym_toggleMenuItemWithTitle:@"阻止更新"
                                                               key:kAntiUpdate
@@ -144,6 +145,11 @@ static void YMProtectAssistantMenuRole(void) {
     NSMenuItem *allowCaptureMenu = [self ym_toggleMenuItemWithTitle:@"允许截图主窗口"
                                                                 key:kAllowWindowCapture
                                                              action:@selector(onAllowWindowCapture:)];
+
+    NSMenuItem *maskDebuggerMenu = [self ym_toggleMenuItemWithTitle:@"屏蔽调试检查（重启生效）"
+                                                             key:kMaskDebuggerCheck
+                                                          action:@selector(onMaskDebuggerCheck:)];
+    maskDebuggerMenu.toolTip = @"仅屏蔽已适配的本地调试状态查询，不保证避免掉线或其他检测。";
 
     BOOL separateRevoke = [[[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] isEqualToString:@"269079"];
     NSMenu *revokeGroupSub = [[NSMenu alloc] initWithTitle:@"消息撤回"];
@@ -226,6 +232,7 @@ static void YMProtectAssistantMenuRole(void) {
         antiUpdateMenu,
         quickQuitMenu,
         allowCaptureMenu,
+        maskDebuggerMenu,
         glassMenu,
         sidebarMenu,
         revokeGroup,
@@ -277,6 +284,13 @@ static void YMProtectAssistantMenuRole(void) {
 {
     [self ym_confirmToggleMenuItem:item
                    userDefaultsKey:kAllowWindowCapture
+                   informativeText:nil];
+}
+
+- (void)onMaskDebuggerCheck:(NSMenuItem *)item
+{
+    [self ym_confirmToggleMenuItem:item
+                   userDefaultsKey:kMaskDebuggerCheck
                    informativeText:nil];
 }
 
