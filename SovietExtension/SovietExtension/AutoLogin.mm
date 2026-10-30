@@ -152,6 +152,14 @@ static BOOL YMAutoLoginTextLooksLikeLoginButton(NSString *text) {
 
     //过滤一下咯
     NSArray<NSString *> *negative = @[
+        @"退出",
+        @"登出",
+        @"注销",
+        @"註銷",
+        @"log out",
+        @"logout",
+        @"sign out",
+        @"signout",
         @"切换账号",
         @"切換帳號",
         @"切換賬號",
