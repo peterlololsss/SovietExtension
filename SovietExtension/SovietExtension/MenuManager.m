@@ -14,6 +14,7 @@
 #import "SidebarManager.h"
 #import "SidebarSettingsWindowController.h"
 #import "QuickQuit.h"
+#import "QuickClose.h"
 #import "CaptureUnblock.h"
 #import "LiquidGlassNavigation.h"
 #import "ThemeHook.h"
@@ -130,6 +131,8 @@ static void YMProtectAssistantMenuRole(void) {
     [SidebarManager registerDefaults];
     [self ym_registerDefaultBool:YES forKey:kQuickQuit];
     YMSetQuickQuitEnabled([[NSUserDefaults standardUserDefaults] boolForKey:kQuickQuit]);
+    [self ym_registerDefaultBool:YES forKey:kQuickClose];
+    YMSetQuickCloseEnabled([[NSUserDefaults standardUserDefaults] boolForKey:kQuickClose]);
     [self ym_registerDefaultBool:NO forKey:kAllowWindowCapture];
     YMSetAllowWindowCaptureEnabled([[NSUserDefaults standardUserDefaults] boolForKey:kAllowWindowCapture]);
     [self ym_registerDefaultBool:NO forKey:kMaskDebuggerCheck];
@@ -141,6 +144,10 @@ static void YMProtectAssistantMenuRole(void) {
     NSMenuItem *quickQuitMenu = [self ym_toggleMenuItemWithTitle:@"⌘Q 直接退出"
                                                              key:kQuickQuit
                                                           action:@selector(onQuickQuit:)];
+
+    NSMenuItem *quickCloseMenu = [self ym_toggleMenuItemWithTitle:@"修复 ⌘W 关闭窗口"
+                                                              key:kQuickClose
+                                                           action:@selector(onQuickClose:)];
 
     NSMenuItem *allowCaptureMenu = [self ym_toggleMenuItemWithTitle:@"允许截图主窗口"
                                                                 key:kAllowWindowCapture
@@ -231,6 +238,7 @@ static void YMProtectAssistantMenuRole(void) {
     [subMenu addItems:@[
         antiUpdateMenu,
         quickQuitMenu,
+        quickCloseMenu,
         allowCaptureMenu,
         maskDebuggerMenu,
         glassMenu,
@@ -278,6 +286,11 @@ static void YMProtectAssistantMenuRole(void) {
     [self ym_confirmToggleMenuItem:item
                    userDefaultsKey:kQuickQuit
                    informativeText:nil];
+}
+
+- (void)onQuickClose:(NSMenuItem *)item
+{
+    [self ym_confirmToggleMenuItem:item userDefaultsKey:kQuickClose informativeText:nil];
 }
 
 - (void)onAllowWindowCapture:(NSMenuItem *)item

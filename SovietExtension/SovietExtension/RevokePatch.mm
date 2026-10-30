@@ -11,6 +11,7 @@
 #import "StartupPermission.h"
 #import "AntiUpdate.h"
 #import "QuickQuit.h"
+#import "QuickClose.h"
 #import "CaptureUnblock.h"
 #import "AutoLogin.h"
 #import <Foundation/Foundation.h>
@@ -5482,6 +5483,7 @@ YMFeatureApplyResult YMApplyFeatureSetting(NSString *key, BOOL enabled) {
     if (![NSThread isMainThread]) return YMFeatureUnavailable;
     if ([key isEqualToString:kAntiUpdate]) return enabled == YMFeatureAntiUpdateEnabled ? YMFeatureApplied : YMFeatureNeedsRestart;
     if ([key isEqualToString:kQuickQuit]) return YMSetQuickQuitEnabled(enabled) ? YMFeatureApplied : YMFeatureUnavailable;
+    if ([key isEqualToString:kQuickClose]) return YMSetQuickCloseEnabled(enabled) ? YMFeatureApplied : YMFeatureUnavailable;
     if ([key isEqualToString:kAllowWindowCapture]) return YMSetAllowWindowCaptureEnabled(enabled) ? YMFeatureApplied : YMFeatureUnavailable;
     if ([key isEqualToString:kMaskDebuggerCheck]) {
         if (enabled == YMFeatureMaskDebuggerCheckEnabled)
